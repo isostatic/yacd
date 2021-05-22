@@ -148,7 +148,7 @@ sub ciscoasa($$$) {
     $s->begin_privileged;
     $toRet .= $s->cmd('terminal pager 0');
     $toRet .= $s->cmd('show version');
-    $toRet =~ s/.*up.*days//;
+    $toRet =~ s/.*up.*days//g;
     $toRet .= $s->cmd('show run');
     $s->end_privileged;
     $s->close;
