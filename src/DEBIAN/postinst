@@ -7,5 +7,6 @@ if [ "$1" = configure ]; then
     systemctl reload apache2
     ln -fs /opt/yacd/configs/ /opt/yacd/site/
     chown nobody:nogroup /opt/yacd/configs/
+    chmod 644 /etc/cron.d/yacd
 fi
 
