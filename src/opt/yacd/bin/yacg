@@ -250,6 +250,7 @@ sub mikrotik($$$) {
         next if /uptime/;
         next if /free-memory/;
         next if /free-hdd-space/;
+        next if /write-sect/;
         next if /cpu-load/;
         $toRet .= $_; 
     }
