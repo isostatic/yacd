@@ -52,6 +52,7 @@ sub genIndex() {
             $old = "class='old'";
         }
         $age = int($age / 60) . " mins";
+        $age .= strftime(" (%H:%MZ)", gmtime($mtime));
         $toPrint .= "<tr><td><a href='$d'>$d</a></td><td>$lastChange</td><td title='$lastCheck' $old>$age</td></tr>\n";
     }
 
