@@ -198,7 +198,7 @@ sub ciscoiosold($$$) {
             opts => [
                 '-oHostKeyAlgorithms=+ssh-dss',
                 '-oKexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1',
-                '-c', 'aes128-cbc'
+                '-c', 'aes128-cbc,aes128-ctr,aes192-ctr,aes256-ctr'
             ],
     });
 }
