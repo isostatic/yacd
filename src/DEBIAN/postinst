@@ -5,7 +5,7 @@ set -e
 if [ "$1" = configure ]; then
     a2ensite yacd.conf
     systemctl reload apache2
-    ln -s /opt/yacd/configs/ /opt/yacd/site/
+    ln -fs /opt/yacd/configs/ /opt/yacd/site/
     chown nobody:nogroup /opt/yacd/configs/
 fi
 
