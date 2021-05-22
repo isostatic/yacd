@@ -1,0 +1,336 @@
+#!/usr/bin/perl
+
+use strict qw(vars subs);
+use POSIX qw(strftime);
+use Digest::MD5 qw(md5_hex);
+# libpath-tiny-perl
+use Path::Tiny;
+# libjson-perl, libjson-xs-perl
+use JSON;
+# libnet-openssh-perl
+use Net::OpenSSH;
+# libnet-appliance-session-perl
+use Net::Appliance::Session;
+# libparallel-forkmanager-perl
+use Parallel::ForkManager;
+
+my $DEBUG=0;
+my $BASE_TARGET = "/opt/yacd/configs/";
+my $BASE_CONF = "/opt/yacd/etc/";
+my $TEMPLATE = "/opt/yacd/site/template.html";
+my $TEMPLATEIND = "/opt/yacd/site/templateind.html";
+
+my $PARALLEL_JOBS = 100;
+my $CTL_DIR = Path::Tiny->tempdir();
+
+sub genIndex() {
+    my @ids = qw//;
+    opendir(D, "$BASE_TARGET");
+    while (my $id = readdir D) {
+        next if $id =~ (/^\./);
+        if (-d "$BASE_TARGET/$id") { push(@ids, $id); }
+    }
+    closedir(D);
+    my $toPrint = "";
+    foreach my $d (sort @ids) {
+        opendir(I, "$BASE_TARGET/$d");
+        my @files = qw//;
+        while (my $file = readdir I) {
+            next unless $file =~ /^2.*config$/;
+            push(@files, $file);
+        }
+        closedir(I);
+        my @sf =sort @files;
+        my $latest = @sf[$#sf];
+        my ($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size,$atime,$mtime,$ctime,$blksize,$blocks) = stat("$BASE_TARGET/$d/index.html");
+        my $lastCheck = strftime("%F %T GMT", gmtime($mtime));
+        my $lastChange = $latest;
+        if ($latest =~ /(....-..-..)-(..:..:..)/) { $lastChange = "$1 $2 GMT"; }
+        my $age = time-$mtime;
+        my $old = "";
+        if ($age > 900) {
+            $old = "class='old'";
+        }
+        $age = int($age / 60) . " mins";
+        $toPrint .= "<tr><td><a href='$d'>$d</a></td><td>$lastChange</td><td title='$lastCheck' $old>$age</td></tr>\n";
+    }
+
+    open(T, $TEMPLATEIND);
+    my $html = "";
+    while (<T>) { 
+        s/__TO_PRINT__/$toPrint/;
+        $html .= $_;
+    }
+    close(T);
+    open(O, ">$BASE_TARGET/index.html");
+    print O $html;
+    close(O);
+}
+
+sub writeTemplate($$) {
+    my ($json, $target) = @_;
+    my $id = $json->{id};
+    my $lastbutonelist = "";
+    my $lastlist = "";
+
+    my @files = ();
+    opendir(D, "$BASE_TARGET/$id");
+    while (my $file = readdir D) {
+        next unless $file =~ /^2.*config$/;
+        push(@files, $file);
+    }
+    my $i = 0;
+    my $change = "";
+    foreach my $file (sort @files) {
+        my $selectedlastbutone = "";
+        my $selectedlast = "";
+        if ($i+1 == $#files) { $selectedlastbutone = "selected"; }
+        if ($i == $#files) { $selectedlast = "selected"; }
+
+#        print "FILE: $file ($i/$#files), $selectedlastbutone|$selectedlast\n";
+    
+        $lastbutonelist .= "<option value='/yacd/configs/$id/$file' $selectedlastbutone>$file</option>\n";
+        $lastlist .= "<option value='/yacd/configs/$id/$file' $selectedlast>$file</option>\n";
+        $i++;
+        $change = "$file GMT"; $change =~ s/.config//;
+    }
+    closedir(D);
+    open(T, $TEMPLATE);
+    my $html = "";
+    my $now = strftime("%F %T GMT", gmtime);
+    while (<T>) { 
+        s/__LAST_SCAN__/$now/g;
+        s/__LAST_CHANGE__/$change/g;
+        s/__DESCRIPTION__/$json->{description}/g;
+        s/__ID__/$json->{id}/g;
+        s/__IP__/$json->{address}/g;
+        s/__TYPE__/$json->{type}/g;
+        s/__LIST_LAST__/$lastbutonelist/g;
+        s/__LIST_LATEST__/$lastlist/g;
+        $html .= $_; 
+    }
+    close(T);
+
+    open(O, ">$BASE_TARGET/$id/index.html");
+    print O $html;
+    close(O);
+
+}
+
+sub sendssh($$) {
+    my ($ssh, $cmd) = @_;
+    print "SEND: $cmd\n";
+    my $toRet = "";
+    my $fh = $ssh->pipe_out("$cmd");
+    while (<$fh>) { $toRet .= $_; print; }
+    close($fh);
+    return $toRet;
+}
+    
+sub ciscoasa($$$) {
+    my ($ip, $username, $password) = @_;
+    my $toRet = "";
+    my $s = Net::Appliance::Session->new({
+        personality => 'asa',
+        transport => 'SSH',
+        host => "$ip",
+        connect_options => { opts => [
+                '-oHostKeyAlgorithms=+ssh-dss',
+                '-oKexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1',
+                '-c', 'aes128-cbc'
+            ], }
+    });
+
+
+#    $s->set_global_log_at('notice');
+    $s->connect({ username => $username, password => $password });
+    $s->begin_privileged;
+    $toRet .= $s->cmd('terminal pager 0');
+    $toRet .= $s->cmd('show version');
+    $toRet =~ s/.*up.*days//;
+    $toRet .= $s->cmd('show run');
+    $s->end_privileged;
+    $s->close;
+
+    return $toRet;
+}
+
+sub juniper($$$) {
+    my ($ip, $username, $password) = @_;
+    my $toRet = "";
+#    return "Juniper NOT SUPPORTED YET";
+    open my $stderr_fh, ">>", "/dev/null";
+    my $ssh = Net::OpenSSH->new("$username:$password\@$ip", 
+        master_opts => [-o => "StrictHostKeyChecking=no"],
+        ctl_dir => $CTL_DIR,
+        default_stderr_fh => $stderr_fh,
+        timeout => 10);
+    $ssh->error and die $ssh->error;
+    my $fh = $ssh->pipe_out("show configuration | display set | no-more");
+    while (<$fh>) { 
+        $toRet .= $_; 
+    }
+    my $fh = $ssh->pipe_out("show chassis hardware | no-more");
+    while (<$fh>) { 
+        $toRet .= $_; 
+    }
+    close($fh);
+
+
+    return $toRet;
+}
+
+sub ciscosg($$$) {
+    my ($ip, $username, $password) = @_;
+    return "CISCO SG NOT SUPPORTED YET";
+}
+sub ciscoios($$$) {
+    my ($ip, $username, $password) = @_;
+    return ciscoiosopt($ip, $username, $password, 1, {
+            opts => [
+            ],
+    });
+}
+
+sub ciscoiosold($$$) {
+    my ($ip, $username, $password) = @_;
+    return ciscoiosopt($ip, $username, $password, 1, {
+            opts => [
+                '-oHostKeyAlgorithms=+ssh-dss',
+                '-oKexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1',
+                '-c', 'aes128-cbc'
+            ],
+    });
+}
+
+sub ciscoiosopt($$$) {
+    my ($ip, $username, $password, $priv, $opts) = @_;
+    my $toRet = "";
+    my $s = Net::Appliance::Session->new({
+        personality => 'ios',
+        timeout => 30,
+        transport => 'SSH',
+        host => "$ip",
+        do_privileged_mode => $priv,
+        connect_options => $opts,
+    });
+
+
+#    $s->set_global_log_at('notice');
+    $s->connect({ username => $username, password => $password });
+#    $toRet .= $s->cmd('show version');
+    $s->begin_privileged;
+    $toRet .= $s->cmd('show run');
+    $s->end_privileged;
+    $s->close;
+
+    $toRet =~ s/NVRAM config last updated.*//;
+    $toRet =~ s/ntp clock-period [0-9]*/ntp clock-period xxxx/;
+    return $toRet;
+}
+
+sub mikrotik($$$) {
+    my ($ip, $username, $password) = @_;
+    my $toRet = "";
+    #print "DBG: $username to $ip\n"; sleep rand 6; return "";
+    my $ssh = Net::OpenSSH->new("$username:$password\@$ip", 
+        ctl_dir => $CTL_DIR,
+        master_opts => [
+                -o => "StrictHostKeyChecking=no",
+                -o => "UserKnownHostsFile=/dev/null",
+                    ],
+        timeout => 10);
+    $ssh->error and die $ssh->error;
+    my $fh = $ssh->pipe_out("system routerboard print");
+    while (<$fh>) { $toRet .= $_; }
+    close($fh);
+    my $fh = $ssh->pipe_out("system resource print");
+    while (<$fh>) { 
+        next if /uptime/;
+        next if /free-memory/;
+        next if /free-hdd-space/;
+        next if /cpu-load/;
+        $toRet .= $_; 
+    }
+    close($fh);
+    my $fh = $ssh->pipe_out("export terse");
+    while (<$fh>) { 
+        s/........... ..:..:.. by Rou/xxx.xx.xxxx xx:xx:xx by Rou/;
+        $toRet .= $_; 
+    }
+    close($fh);
+
+    return $toRet;
+}
+sub do_file($) {
+    my ($fname) = @_;
+    # read config into a json object
+    open(F, "<$fname"); my $content = ""; while(<F>) { $content .= $_; }  close(F); my $json = decode_json($content);
+    my $type = $json->{type};
+    my $ip = $json->{address};
+    my $id = $json->{id};
+    my $username = $json->{username};
+    my $password = $json->{password};
+
+    # Pull current config
+#    print "Get $id\n";
+    my $config = $type->($ip, $username, $password);
+
+    if ($config eq "") {
+        print "WARN: No config from $id\n";
+    }
+
+    # Calculate checksum of config
+    my $oldchecksum = "";
+    my $newchecksum = md5_hex($config);
+
+
+    my $target = "$BASE_TARGET/$id/";
+    mkdir "$target";
+
+    # Calculate checksum of latest config we have
+    if (-l "$target/latest.config") {
+        open(L, "<$target/latest.config"); my $l = ""; while (<L>) { $l .= $_; }; close(L);
+        $oldchecksum = md5_hex($l);
+    }
+
+    if ($oldchecksum ne $newchecksum) {
+        print "$id has changed\n";
+        my $dateConfig = "$target/".strftime("%F-%T", gmtime).".config";
+        my $latestConfig = "$target/latest.config";
+        open(F, ">$dateConfig");
+        print F $config;
+        close(F);
+        unlink $latestConfig;
+        symlink $dateConfig, $latestConfig;
+    }
+    writeTemplate($json, $target);
+
+}
+
+if ($ARGV[0]) {
+    eval {do_file($ARGV[0]); };
+    print "ERROR: ".$ARGV[0]." died: $@\n" if ($@);
+    genIndex();
+    exit;
+}
+
+my $manager = Parallel::ForkManager->new($PARALLEL_JOBS);  
+
+opendir my $dh, $BASE_CONF;
+my $i = 0;
+while (my $stub = readdir $dh) {
+    $i++;
+    my $file = "$BASE_CONF/$stub";
+    $manager->start and next;
+    srand;
+    if (-f $file) {
+        eval { do_file($file); };
+        print "ERROR: $file died: $@\n" if ($@);
+    }
+    $manager->finish;
+}
+$manager->wait_all_children;
+print "THE END, all $i returned\n";
+
+genIndex();

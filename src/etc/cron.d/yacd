@@ -1,0 +1,1 @@
+*/8 * * * * nobody /opt/yacd/bin/yacg >/dev/null 2>&1

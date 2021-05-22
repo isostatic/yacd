@@ -1,0 +1,9 @@
+Package: yacd
+Version: 1.0.__datestamp__
+Architecture: all
+Maintainer: Paul Weaver <paul@mewweaver.com>
+Depends: perl, libpath-tiny-perl, libjson-perl, libjson-xs-perl, libnet-openssh-perl, libnet-appliance-session-perl, libparallel-forkmanager-perl, apache2
+Section: web
+Priority: optional
+Installed-Size: 1000
+Description: Script to pull and backup configs for switches, routers, etc
