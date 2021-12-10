@@ -16,6 +16,7 @@ use Parallel::ForkManager;
 
 my $DEBUG=0;
 my $BASE_TARGET = "/opt/yacd/configs/";
+my $ARP_TARGET = "/opt/yacd/arp/";
 my $BASE_CONF = "/opt/yacd/etc/";
 my $TEMPLATE = "/opt/yacd/site/template.html";
 my $TEMPLATEIND = "/opt/yacd/site/templateind.html";
@@ -23,8 +24,10 @@ my $TEMPLATEIND = "/opt/yacd/site/templateind.html";
 my $PARALLEL_JOBS = 100;
 my $CTL_DIR = Path::Tiny->tempdir();
 
+## Geneate the index
 sub genIndex() {
     my @ids = qw//;
+    # Read all configs on the disk, stored in directory name with files in each directory
     opendir(D, "$BASE_TARGET");
     while (my $id = readdir D) {
         next if $id =~ (/^\./);
@@ -32,6 +35,7 @@ sub genIndex() {
     }
     closedir(D);
     my $toPrint = "";
+    # Foreach router (in the config directory)
     foreach my $d (sort @ids) {
         opendir(I, "$BASE_TARGET/$d");
         my @files = qw//;
@@ -53,7 +57,12 @@ sub genIndex() {
         }
         $age = int($age / 60) . " mins";
         $age .= strftime(" (%H:%MZ)", gmtime($mtime));
-        $toPrint .= "<tr><td><a href='$d'>$d</a></td><td>$lastChange</td><td title='$lastCheck' $old>$age</td></tr>\n";
+
+        my $modver = calculateModelVersion($d);
+        my $version = $modver->{version};
+        my $model = $modver->{type} . " " . $modver->{model} . ": " . $modver->{sn};
+
+        $toPrint .= "<tr><td><a href='$d'>$d</a> ($model)</td><td>$lastChange</td><td title='$lastCheck' $old>$age</td><td>$version</td></tr>\n";
     }
 
     open(T, $TEMPLATEIND);
@@ -68,6 +77,97 @@ sub genIndex() {
     close(O);
 }
 
+sub calculateModelVersion($) {
+    my ($rtr) = @_;
+    my $toRet = {};
+    $toRet->{version} = "";
+    $toRet->{sn} = "";
+    $toRet->{type} = "unknown";
+    $toRet->{model} = "";
+    if (-f "$BASE_TARGET/$rtr/latest.config") {
+        open(F, "$BASE_TARGET/$rtr/latest.config");
+        my $mtik = {};
+        my $cisco = {};
+        my $juniper = {};
+        while (<F>) {
+            ## Fortigate
+            if (/config-version=([^:]+):/) {
+                $toRet->{type} = "Fortigate";
+                my $mv = $1;
+                if ($mv =~ /([^-]*)-(.*)/) {
+                    $toRet->{version} = $2;
+                    $toRet->{model} = $1;
+                }
+                last;
+            }
+                
+            ## Cisco Switch
+            if (/^version (.*)/) { $cisco->{ver} = $1; }
+            if (/^switch [0-9]* provision (.*)/) { $cisco->{mod} = $1; }
+            if (/^line vty /) { 
+                # Cisco
+                $toRet->{type} = "Cisco";
+                $toRet->{version} = $cisco->{ver};
+                $toRet->{model} = $cisco->{mod};
+                $toRet->{sn} = "";
+                last;
+            }
+
+            ## Mikrotik Router
+            if (/model: (.*)/) { $mtik->{mod} = $1; }
+            if (/board-name: (.*)/) { $mtik->{mod} = $1; }
+            if (/version: (.*)/) { $mtik->{ver} = $1; }
+            if (/serial-number: (.*)/) { $mtik->{sn} = $1; }
+            if (/platform: MikroTik/) {
+                ## It's a mikrotik
+                $toRet->{version} = $mtik->{ver};
+                $toRet->{model} = $mtik->{mod};
+                $toRet->{sn} = $mtik->{sn};
+                $toRet->{type} = "Mikrotik";
+                last;
+            }
+
+            # Cisco SG
+            if (/CISCO SG NOT SUPPORTED/) {
+                $toRet->{type} = "Cisco SG";
+                $toRet->{version} = "n/a";
+                last;
+            }
+
+            ## ASA
+            if (/Cisco Adaptive Security Appliance Software Version (.*)/) { $cisco->{ver} = $1; }
+            if (/^Hardware: *([^,]*)/) { $cisco->{mod} = $1; }
+            if (/^Serial Number: (.*)/) { $cisco->{sn} = $1; }
+            if (/^Cryptochecksum:/) {
+                $toRet->{version} = $cisco->{ver};
+                $toRet->{model} = $cisco->{mod};
+                $toRet->{sn} = $cisco->{sn};
+                $toRet->{type} = "ASA";
+                last;
+            }
+
+            ## Juniper
+            if (/set version (.*)/) { $juniper->{ver} = $1; }
+            if (/^Chassis +([^ ]+) +([^ ]+)/) { 
+                $toRet->{sn} = $1;
+                $toRet->{mod} = $2; 
+                $toRet->{version} = $juniper->{ver}; 
+                $toRet->{type} = "Juniper EX";
+                last;
+            }
+        }
+        close(F);
+    }
+    # Router $rtr config in $BASE_TARGET/$rtr/latest.config
+    return $toRet;
+}
+
+sub writeArp($$) {
+    my ($arp, $target) = @_;
+    open(F, ">$target");
+    print F $arp;
+    close(F);
+}
 sub writeTemplate($$) {
     my ($json, $target) = @_;
     my $id = $json->{id};
@@ -130,7 +230,7 @@ sub sendssh($$) {
     
 sub ciscoasa($$$) {
     my ($ip, $username, $password) = @_;
-    my $toRet = "";
+    my $config = "";
     my $s = Net::Appliance::Session->new({
         personality => 'asa',
         transport => 'SSH',
@@ -146,19 +246,44 @@ sub ciscoasa($$$) {
 #    $s->set_global_log_at('notice');
     $s->connect({ username => $username, password => $password });
     $s->begin_privileged;
-    $toRet .= $s->cmd('terminal pager 0');
-    $toRet .= $s->cmd('show version');
-    $toRet =~ s/.*up.*days//g;
-    $toRet .= $s->cmd('show run');
+    $config .= $s->cmd('terminal pager 0');
+    $config .= $s->cmd('show version');
+    $config =~ s/.*up.*days//g;
+    $config .= $s->cmd('show run');
     $s->end_privileged;
     $s->close;
 
+    my $toRet = {};
+    $toRet->{config} = $config;
+    return $toRet;
+}
+
+sub fortigate($$$) {
+    my ($ip, $username, $password) = @_;
+    my $config = "";
+    open my $stderr_fh, ">>", "/dev/null";
+    my $ssh = Net::OpenSSH->new("$username:$password\@$ip", 
+        master_opts => [-o => "StrictHostKeyChecking=no"],
+        ctl_dir => $CTL_DIR,
+        default_stderr_fh => $stderr_fh,
+        timeout => 10);
+    $ssh->error and die $ssh->error;
+    my $fh = $ssh->pipe_out("show");
+    while (<$fh>) { 
+        next if (/set password ENC /);
+        next if (/set key ENC /);
+        $config .= $_; 
+    }
+    close($fh);
+
+    my $toRet = {};
+    $toRet->{config} = $config;
     return $toRet;
 }
 
 sub juniper($$$) {
     my ($ip, $username, $password) = @_;
-    my $toRet = "";
+    my $config = "";
 #    return "Juniper NOT SUPPORTED YET";
     open my $stderr_fh, ">>", "/dev/null";
     my $ssh = Net::OpenSSH->new("$username:$password\@$ip", 
@@ -169,21 +294,26 @@ sub juniper($$$) {
     $ssh->error and die $ssh->error;
     my $fh = $ssh->pipe_out("show configuration | display set | no-more");
     while (<$fh>) { 
-        $toRet .= $_; 
+        $config .= $_; 
     }
     my $fh = $ssh->pipe_out("show chassis hardware | no-more");
     while (<$fh>) { 
-        $toRet .= $_; 
+        $config .= $_; 
     }
     close($fh);
 
 
+    my $toRet = {};
+    $toRet->{config} = $config;
     return $toRet;
 }
 
 sub ciscosg($$$) {
     my ($ip, $username, $password) = @_;
-    return "CISCO SG NOT SUPPORTED YET";
+    my $config = "CISCO SG NOT SUPPORTED YET";
+    my $toRet = {};
+    $toRet->{config} = $config;
+    return $toRet;
 }
 sub ciscoios($$$) {
     my ($ip, $username, $password) = @_;
@@ -206,7 +336,7 @@ sub ciscoiosold($$$) {
 
 sub ciscoiosopt($$$) {
     my ($ip, $username, $password, $priv, $opts) = @_;
-    my $toRet = "";
+    my $config = "";
     my $s = Net::Appliance::Session->new({
         personality => 'ios',
         timeout => 30,
@@ -219,20 +349,23 @@ sub ciscoiosopt($$$) {
 
 #    $s->set_global_log_at('notice');
     $s->connect({ username => $username, password => $password });
-#    $toRet .= $s->cmd('show version');
+#    $config .= $s->cmd('show version');
     $s->begin_privileged;
-    $toRet .= $s->cmd('show run');
+    $config .= $s->cmd('show run');
     $s->end_privileged;
     $s->close;
 
-    $toRet =~ s/NVRAM config last updated.*//;
-    $toRet =~ s/ntp clock-period [0-9]*/ntp clock-period xxxx/;
+    $config =~ s/NVRAM config last updated.*//;
+    $config =~ s/ntp clock-period [0-9]*/ntp clock-period xxxx/;
+
+    my $toRet = {};
+    $toRet->{config} = $config;
     return $toRet;
 }
 
 sub mikrotik($$$) {
     my ($ip, $username, $password) = @_;
-    my $toRet = "";
+    my $config = "";
     #print "DBG: $username to $ip\n"; sleep rand 6; return "";
     my $ssh = Net::OpenSSH->new("$username:$password\@$ip", 
         ctl_dir => $CTL_DIR,
@@ -243,7 +376,7 @@ sub mikrotik($$$) {
         timeout => 10);
     $ssh->error and die $ssh->error;
     my $fh = $ssh->pipe_out("system routerboard print");
-    while (<$fh>) { $toRet .= $_; }
+    while (<$fh>) { $config .= $_; }
     close($fh);
     my $fh = $ssh->pipe_out("system resource print");
     while (<$fh>) { 
@@ -252,16 +385,27 @@ sub mikrotik($$$) {
         next if /free-hdd-space/;
         next if /write-sect/;
         next if /cpu-load/;
-        $toRet .= $_; 
+        $config .= $_; 
     }
     close($fh);
     my $fh = $ssh->pipe_out("export terse");
     while (<$fh>) { 
         s/........... ..:..:.. by Rou/xxx.xx.xxxx xx:xx:xx by Rou/;
-        $toRet .= $_; 
+        $config .= $_; 
+    }
+    close($fh);
+    my $arp = "";
+    my $fh = $ssh->pipe_out("ip arp print without-paging");
+    while (<$fh>) { 
+        if (/C ([0-9.]+) +([0-9A-F:]+)/) {
+            $arp .= "$1,$2\n";; 
+        }
     }
     close($fh);
 
+    my $toRet = {};
+    $toRet->{config} = $config;
+    $toRet->{arp} = $arp;
     return $toRet;
 }
 sub do_file($) {
@@ -276,12 +420,14 @@ sub do_file($) {
 
     # Pull current config
 #    print "Get $id\n";
-    my $config = $type->($ip, $username, $password);
+    my $ret = $type->($ip, $username, $password);
+    my $config = $ret->{config};
 
     if ($config eq "") {
         print "WARN: No config from $id\n";
     }
 
+    my $arp = $ret->{arp};
     # Calculate checksum of config
     my $oldchecksum = "";
     my $newchecksum = md5_hex($config);
@@ -289,6 +435,7 @@ sub do_file($) {
 
     my $target = "$BASE_TARGET/$id/";
     mkdir "$target";
+    mkdir "$ARP_TARGET";
 
     # Calculate checksum of latest config we have
     if (-l "$target/latest.config") {
@@ -307,6 +454,7 @@ sub do_file($) {
         symlink $dateConfig, $latestConfig;
     }
     writeTemplate($json, $target);
+    writeArp($arp, "$ARP_TARGET/$id.config");
 
 }
 
