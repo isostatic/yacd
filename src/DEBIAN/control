@@ -1,7 +1,7 @@
 Package: yacd
 Version: 1.0.__datestamp__
 Architecture: all
-Maintainer: Paul Weaver <paul@mewweaver.com>
+Maintainer: Paul Weaver <paul@newweaver.com>
 Depends: perl, libpath-tiny-perl, libjson-perl, libjson-xs-perl, libnet-openssh-perl, libnet-appliance-session-perl, libparallel-forkmanager-perl, apache2
 Section: web
 Priority: optional
