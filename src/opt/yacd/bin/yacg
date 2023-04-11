@@ -51,18 +51,42 @@ sub genIndex() {
         my $lastChange = $latest;
         if ($latest =~ /(....-..-..)-(..:..:..)/) { $lastChange = "$1 $2 GMT"; }
         my $age = time-$mtime;
+        my $secs = $age;
         my $old = "";
+        # if over 900 seconds / 15 minutes mark as old
         if ($age > 900) {
             $old = "class='old'";
         }
-        $age = int($age / 60) . " mins";
-        $age .= strftime(" (%H:%MZ)", gmtime($mtime));
+        if ($age < 5400) { # if under 90 minutes display in minutes
+            $age = int($age / 60) . " mins";
+            $age .= strftime(" (%H:%MZ)", gmtime($mtime));
+        } elsif ($age < 129600) { # if under 36 hours use hours and show Monday 09:43
+            $age = int($age / 3600) . " hours";
+            $age .= strftime(" (%a %H:%MZ)", gmtime($mtime));
+        } elsif ($age < (25 * 86400)) { # if under 25 days use days and show May 8 09:43
+            $age = int($age / 86400) . " days";
+            $age .= strftime(" (%b %e %H:%MZ)", gmtime($mtime));
+        } elsif ($age < (70 * 86400)) { # if under 70 days use weeks and show May 8 09:43
+            $age = int($age / (7 * 86400)) . " weeks";
+            $age .= strftime(" (%b %e %H:%MZ)", gmtime($mtime));
+        } elsif ($age < (150 * 86400)) { # if under 150 days use approximate months and show May 8 09:43
+            $age = int($age / (30 * 86400)) . " months";
+            $age .= strftime(" (%b %e %H:%MZ)", gmtime($mtime));
+        } elsif ($age < (450 * 86400)) { # if under 450 days use approximate months and show May 8 2019 09:43
+            $age = int($age / (30 * 86400)) . " months";
+            $age .= strftime(" (%b %e %Y %H:%MZ)", gmtime($mtime));
+        } elsif ($mtime < 100) { # never
+            $age = "never";
+        } else { # else use approximate years and show May 8 2019 09:43
+            $age = int($age / (365*86400)) . " years";
+            $age .= strftime(" (%b %e %Y %H:%MZ)", gmtime($mtime));
+        }
 
         my $modver = calculateModelVersion($d);
         my $version = $modver->{version};
         my $model = $modver->{type} . " " . $modver->{model} . ": " . $modver->{sn};
 
-        $toPrint .= "<tr><td><a href='$d'>$d</a> ($model)</td><td>$lastChange</td><td title='$lastCheck' $old>$age</td><td>$version</td></tr>\n";
+        $toPrint .= "<tr><td><a href='$d'>$d</a> ($model)</td><td>$lastChange</td><td title='$lastCheck' $old data-text='$secs $age'>$age</td><td>$version</td></tr>\n";
     }
 
     open(T, $TEMPLATEIND);
@@ -75,6 +99,7 @@ sub genIndex() {
     open(O, ">$BASE_TARGET/index.html");
     print O $html;
     close(O);
+    `/opt/yacd/bin/makeLatest.sh`;
 }
 
 sub calculateModelVersion($) {
@@ -248,7 +273,8 @@ sub ciscoasa($$$) {
     $s->begin_privileged;
     $config .= $s->cmd('terminal pager 0');
     $config .= $s->cmd('show version');
-    $config =~ s/.*up.*days//g;
+    $config =~ s/.*up.*hours?//g;
+    $config =~ s/.*up.*days?//g;
     $config .= $s->cmd('show run');
     $s->end_privileged;
     $s->close;
@@ -272,6 +298,7 @@ sub fortigate($$$) {
     while (<$fh>) { 
         next if (/set password ENC /);
         next if (/set key ENC /);
+        next if (/conf_file_ver= /);
         $config .= $_; 
     }
     close($fh);
@@ -391,6 +418,19 @@ sub mikrotik($$$) {
     my $fh = $ssh->pipe_out("export terse");
     while (<$fh>) { 
         s/........... ..:..:.. by Rou/xxx.xx.xxxx xx:xx:xx by Rou/;
+        $config .= $_; 
+    }
+    close($fh);
+    $config .= "\n###### USERS ########\n";
+    my $fh = $ssh->pipe_out("user print");
+    while (<$fh>) { 
+        s/^/# /;
+        $config .= $_; 
+    }
+    close($fh);
+    my $fh = $ssh->pipe_out("user ssh-keys print");
+    while (<$fh>) { 
+        s/^/# /;
         $config .= $_; 
     }
     close($fh);
